@@ -652,19 +652,25 @@ function makeDraggable(el, ai, key, where) {
 }
 
 function placeMarks(container, marks, toPct) {
-  const lastX = [-1e9, -1e9];
-  marks.sort((x, y) => x.t - y.t).forEach((m) => {
-    const x = toPct(m.t);
-    const row = x - lastX[0] >= 7 ? 0 : x - lastX[1] >= 7 ? 1 : 0;
-    lastX[row] = x;
+  // 이름표가 겹치면 두 줄로 나누고, 그래도 겹치면 점만 남긴다 (선택한 표시는 항상 이름표)
+  const width = container.getBoundingClientRect().width || 300;
+  const est = (k) => 16 + 12 * S.cfg.eventShort[k].length;
+  const placed = [];
+  for (const m of marks.slice().sort((x, y) => (y.selected - x.selected) || (x.t - y.t))) {
+    const x = (toPct(m.t) / 100) * width;
+    const w = est(m.k);
+    const row = [0, 1].find((r) => placed.every((p) => p.compact || p.row !== r || Math.abs(p.x - x) >= (p.w + w) / 2 + 3));
+    placed.push(Object.assign({}, m, { x, w, row: row === undefined ? 0 : row, compact: row === undefined }));
+  }
+  for (const m of placed) {
     const el = h('div', {
-      class: `tl-mark row-${row}${m.selected ? ' selected' : ''}${m.dim ? ' dim' : ''}`,
-      style: `left:${x}%;--c:${COLORS[m.k]}`,
-      title: `#${m.ai + 1} ${S.cfg.eventShort[m.k]} ${fmt(m.t)} — 끌어서 옮기기`,
+      class: `tl-mark row-${m.row}${m.compact ? ' compact' : ''}${m.selected ? ' selected' : ''}${m.dim ? ' dim' : ''}`,
+      style: `left:${toPct(m.t)}%;--c:${COLORS[m.k]}`,
+      title: `시도 ${m.ai + 1} · ${S.cfg.eventShort[m.k]} ${fmt(m.t)} — 끌어서 옮기기`,
     }, h('span', {}, S.cfg.eventShort[m.k]));
     makeDraggable(el, m.ai, m.k, container === timeline ? 'main' : 'zoom');
     container.append(el);
-  });
+  }
 }
 
 function renderTimeline() {
@@ -861,8 +867,9 @@ function renderAttemptExtra() {
       h('button', { class: `btn${r.overridden ? ' active' : ''}`, onclick: openOverride }, r.overridden ? `직접 고름: ${S.cfg.resultNames[r.result]}` : '판정이 달라요'),
       h('button', { class: `btn${a.ex.length ? ' active' : ''}`, onclick: openSpecial }, a.ex.length ? `특이 상황 ${a.ex.length}개` : '특이 상황'),
       h('button', { class: 'btn ghost danger', onclick: deleteAttempt }, '이 시도 삭제')),
-    note,
-    a.ex.length ? h('div', { class: 'tag-list' }, a.ex.map((c) => h('span', { class: 'tag' }, S.cfg.exCodes[c] || '특이 상황'))) : null);
+    note);
+  // append(null)은 "null" 글자를 붙이므로 있을 때만 넣는다
+  if (a.ex.length) box.append(h('div', { class: 'tag-list' }, a.ex.map((c) => h('span', { class: 'tag' }, S.cfg.exCodes[c] || '특이 상황'))));
 }
 
 function renderDoneRow() {
@@ -958,8 +965,7 @@ function guide() {
   if (a) {
     const n = Rules.nextEvent(a);
     if (n) {
-      const alt = n.alt && n.key !== 'S' ? ` 탑에 못 갔다면 '${S.cfg.eventNames[n.alt]}'를 찍어요.` : '';
-      return { step: 3, text: `③ 다음: '${S.cfg.eventNames[n.key]}' — ${S.cfg.eventHelp[n.key]}.${alt}` };
+      return { step: 3, text: `③ 다음: '${S.cfg.eventNames[n.key]}' — ${S.cfg.eventHelp[n.key]}${Rules.altHint(n, S.cfg)}` };
     }
   }
   if (p.attempts.some((x) => !Rules.evaluateAttempt(x, S.cfg).complete)) return { step: 3, text: '③ 입력 중인 시도가 있어요. 위의 노란 시도를 눌러 마저 찍어 주세요.' };
@@ -1122,7 +1128,7 @@ function showCoverage() {
   const sug = S.cfg.targets ? Rules.suggestions(c, S.cfg) : [];
   const t = c.targets;
   const row = (name, v, target) => h('tr', {}, h('td', {}, name), h('td', { class: 'num' }, target ? `${v} / ${target}` : String(v)),
-    target ? h('td', {}, h('span', { class: 'bar' }, h('span', { style: `width:${Math.min(100, (v / target) * 100)}%` }))) : h('td'));
+    target ? h('td', {}, h('span', { class: 'meter' }, h('span', { style: `width:${Math.min(100, (v / target) * 100)}%` }))) : h('td'));
   const named = (map, names) => Object.entries(map).map(([k, v]) => `${names[k] || '모름'} ${v}`).join(' · ') || '—';
   openModal(
     h('h2', {}, '모은 데이터 현황'),

@@ -129,6 +129,12 @@
     return { key: 'E', alt: null };
   }
 
+  /** 다음 순간 대신 찍을 것 안내: ' (탑에 못 갔다면 '착지')' */
+  function altHint(n, cfg) {
+    if (!n || !n.alt || n.key === 'S') return '';
+    return ` (${n.key === 'M' ? '양손으로 못 잡았다면' : '탑에 못 갔다면'} '${cfg.eventNames[n.alt]}')`;
+  }
+
   /** 쉬운 말 판정 문장 */
   function verdictText(a, cfg) {
     const r = evaluateAttempt(a, cfg);
@@ -138,6 +144,9 @@
       const reason = a.override && a.override.reason ? ` · ${a.override.reason}` : '';
       return `${cfg.resultNames[r.result]} — 직접 고름${reason}`;
     }
+    const n = nextEvent(a);
+    const askNext = () => (n ? `입력 중 — '${cfg.eventNames[n.key]}'을(를) 찍어 주세요${altHint(n, cfg)}` : '입력 중');
+    if (!r.complete && r.result !== 'NOT_ATTEMPT') return askNext(); // 찍는 중에는 '실패'라고 단정하지 않는다
     switch (r.result) {
       case 'SEND': return `완등 — 탑 양손 ${sec(r.holdMs)} 유지`;
       case 'FAIL':
@@ -146,10 +155,7 @@
         return '실패 — 탑에 닿지 못함';
       case 'NOT_ATTEMPT': return `시도 아님 (이륙 없음) — 이륙했다면 '${cfg.eventNames.L}'을(를) 찍어 주세요`;
       case 'UNKNOWN': return '판단 불가';
-      default: {
-        const n = nextEvent(a);
-        return n ? `입력 중 — '${cfg.eventNames[n.key]}'을(를) 찍어 주세요` : '입력 중';
-      }
+      default: return askNext();
     }
   }
 
@@ -311,7 +317,7 @@
   }
 
   root.Rules = {
-    KEYS, DEFAULTS, config, fmtMs, events, orderIssues, derive, interval, evaluateAttempt, nextEvent, verdictText,
+    KEYS, DEFAULTS, config, fmtMs, events, orderIssues, derive, interval, evaluateAttempt, nextEvent, altHint, verdictText,
     labelStatus, coverage, suggestions, fingerprintBlob, newLabel, normalizeLabel,
   };
 })(typeof window !== 'undefined' ? window : globalThis);
