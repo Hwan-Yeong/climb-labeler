@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' https://api.github.com; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self'; manifest-src 'self'">
+<meta name="theme-color" content="#14161a">
+<title>클라이밍 라벨링</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="bar">
+  <button id="menuBtn" class="icon-btn" aria-label="메뉴">☰</button>
+  <div class="bar-title"><b>클라이밍 라벨링</b><span id="videoTitle" class="bar-sub"></span></div>
+  <button id="undoBtn" class="icon-btn" title="되돌리기 (⌘Z)" aria-label="되돌리기" disabled>↶</button>
+  <button id="syncChip" class="sync-chip" title="저장 상태 — 누르면 지금 올려요"></button>
+</header>
+
+<main class="main">
+  <aside class="list" id="listPanel">
+    <div class="list-actions">
+      <button class="btn primary wide" data-act="open-file">영상 열기</button>
+      <button class="btn wide" data-act="next-video">다음 영상</button>
+    </div>
+    <div class="list-progress" data-slot="progress"></div>
+    <ul class="video-list" data-slot="videos"></ul>
+  </aside>
+
+  <section class="stage">
+    <div id="banners" class="banners"></div>
+    <div class="player" id="player">
+      <video id="video" playsinline preload="auto"></video>
+      <canvas id="overlay"></canvas>
+      <div id="drawBar" class="draw-bar" hidden><span id="drawText"></span><button id="drawCancel" class="btn small">취소</button></div>
+      <div id="emptyState" class="empty-state">
+        <p class="empty-title">라벨링할 영상을 열어 주세요</p>
+        <p class="muted">폰 갤러리나 이 컴퓨터의 영상을 그대로 열어요. 영상은 어디에도 올라가지 않아요.</p>
+        <button class="btn primary big" data-act="open-file">영상 열기</button>
+      </div>
+      <div id="toast" class="toast" hidden><span id="toastText"></span><button id="toastAction" class="btn small" hidden></button></div>
+    </div>
+
+    <div class="transport">
+      <button class="btn" data-act="sec" data-n="-1" title="1초 뒤로 (Shift+←)">−1초</button>
+      <button class="btn" data-act="frame" data-n="-1" title="1프레임 뒤로 (←)">◀ 1프레임</button>
+      <button class="btn primary play" id="playBtn" title="재생 (Space)">▶</button>
+      <button class="btn" data-act="frame" data-n="1" title="1프레임 앞으로 (→)">1프레임 ▶</button>
+      <button class="btn" data-act="sec" data-n="1" title="1초 앞으로 (Shift+→)">+1초</button>
+    </div>
+    <div class="time-row">
+      <span id="timeText" class="time">0:00.000</span>
+      <span id="frameText" class="muted small"></span>
+      <span class="spacer"></span>
+      <button class="btn small" id="speedBtn" title="재생 속도 ([ ])">1×</button>
+    </div>
+    <div class="timeline" id="timeline" aria-label="타임라인"><div class="tl-rail"></div><div class="playhead" id="playhead"></div></div>
+    <div class="zoom" id="zoom" hidden>
+      <div class="zoom-head"><span id="zoomTitle"></span><span class="muted small">끌어서 미세 조정 · ±2초 확대</span></div>
+      <div class="zoom-rail" id="zoomRail"><div class="zoom-ticks" id="zoomTicks"></div><div class="playhead" id="zoomPlayhead"></div></div>
+    </div>
+    <div class="guide" id="guide">
+      <ol class="steps"><li data-step="1">영상</li><li data-step="2">홀드</li><li data-step="3">순간</li><li data-step="4">끝</li></ol>
+      <p id="guideText"></p>
+      <button class="btn primary" id="guideAction" hidden></button>
+    </div>
+  </section>
+
+  <section class="sheet" id="sheet">
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="moments">순간 찍기</button>
+      <button class="tab" data-tab="holds">홀드 영역</button>
+      <button class="tab" data-tab="info">영상 정보 <span class="muted">(선택)</span></button>
+    </nav>
+
+    <div class="tab-body" data-body="moments">
+      <div class="attempt-bar" id="attemptBar"></div>
+      <div class="verdict" id="verdict"></div>
+      <div class="moment-grid" id="momentGrid"></div>
+      <div class="edit-row" id="editRow" hidden></div>
+      <div class="attempt-extra" id="attemptExtra"></div>
+      <div class="done-row" id="doneRow"></div>
+    </div>
+
+    <div class="tab-body" data-body="holds" hidden>
+      <p class="muted">홀드가 보이는 장면에서 <b>표시하기</b>를 누르고 영상 위 홀드를 <b>탭</b>(또는 드래그)하세요. 표시한 뒤에는 상자를 끌어 옮기거나 모서리를 끌어 크기를 바꿀 수 있어요.</p>
+      <div id="holdRows" class="hold-rows"></div>
+      <div class="problem-row">
+        <label class="field">문제 이름 <span class="muted">(선택)</span><input class="input" id="problemName" placeholder="예: 노랑 V3"></label>
+        <div id="problemTabs" class="problem-tabs"></div>
+      </div>
+    </div>
+
+    <div class="tab-body" data-body="info" hidden>
+      <p class="muted">몰라도 괜찮아요. 아는 것만 골라 주세요 — 어떤 영상이 더 필요한지 알려 줄 때 써요.</p>
+      <div class="form" id="infoForm">
+        <label class="field">암장<input class="input" data-tag="gym" list="gymList" placeholder="암장 이름"></label>
+        <datalist id="gymList"></datalist>
+        <label class="field">찍은 각도<select class="input" data-tag="angle"></select></label>
+        <label class="field">찍은 방법<select class="input" data-tag="camera"></select></label>
+        <label class="field">화면 속 사람 수<select class="input" data-tag="people"></select></label>
+        <label class="field">표준 촬영 조건<select class="input" data-tag="standard"><option value="">모름</option><option value="Y">예</option><option value="N">아니요</option></select><span class="hint" id="standardHint"></span></label>
+        <label class="field wide">메모<input class="input" data-tag="note" placeholder="영상 전체에 대한 메모"></label>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div id="drawer" class="drawer" hidden>
+  <div class="drawer-card">
+    <div class="drawer-head"><b>메뉴</b><button class="icon-btn" data-act="close-drawer" aria-label="닫기">✕</button></div>
+    <div class="drawer-list">
+      <div class="list-actions">
+        <button class="btn primary wide" data-act="open-file">영상 열기</button>
+        <button class="btn wide" data-act="next-video">다음 영상</button>
+      </div>
+      <div class="list-progress" data-slot="progress"></div>
+      <ul class="video-list" data-slot="videos"></ul>
+    </div>
+    <div class="menu">
+      <button class="menu-item" data-act="sync">지금 저장소에 올리기</button>
+      <button class="menu-item" data-act="coverage">모은 데이터 현황</button>
+      <button class="menu-item" data-act="help">사용법</button>
+      <button class="menu-item" data-act="export">라벨 파일로 내보내기</button>
+      <button class="menu-item" data-act="import">라벨 파일 가져오기</button>
+      <button class="menu-item" data-act="settings">연결 설정</button>
+    </div>
+  </div>
+</div>
+<div id="modal" class="modal" hidden><div class="modal-card" id="modalCard"></div></div>
+<input type="file" id="filePicker" accept="video/*" hidden>
+<input type="file" id="importPicker" accept="application/json,.json" hidden>
+<script src="rules.js"></script>
+<script src="store.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
