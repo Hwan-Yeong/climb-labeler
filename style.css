@@ -35,6 +35,8 @@ button, input, select { font: inherit; color: inherit; }
   display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap;
 }
 .btn:hover { border-color: #46506a; }
+/* 꾹 누르면 계속 움직이는 버튼: 길게 눌러도 글자 선택·메뉴·화면 끌기가 끼어들지 않게 */
+.btn.hold { touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 .btn:disabled { opacity: .45; cursor: default; }
 .btn.small { min-height: 36px; padding: 0 10px; font-size: 14px; }
 .btn.big { min-height: 56px; padding: 0 28px; font-size: 17px; }

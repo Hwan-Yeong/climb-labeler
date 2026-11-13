@@ -615,10 +615,10 @@ function clearMoment(key) {
   toast(`'${S.cfg.eventShort[key]}'을(를) 지웠어요`, '되돌리기', undo);
 }
 
-function nudgeMoment(key, frames) {
+function nudgeMoment(key, frames, snapshot = true) {
   const a = curAttempt();
   if (!a || a.events[key] == null) return;
-  mutate(() => { a.events[key] = Math.max(0, Math.round(a.events[key] + (frames * 1000) / S.fps)); });
+  mutate(() => { a.events[key] = Math.max(0, Math.round(a.events[key] + (frames * 1000) / S.fps)); }, { snapshot });
   video.pause();
   seek(a.events[key] / 1000);
 }
@@ -947,6 +947,44 @@ function onCanvasWheel(e) {
   zoomAt(p.x, p.y, Math.exp(-e.deltaY * 0.002));
 }
 
+// ---------------------------------------------------------------- 꾹 누르면 계속
+
+// 누르는 순간 한 번 움직이고, HOLD_DELAY_MS 뒤부터 손을 뗄 때까지 반복한다 (안드로이드 반복 버튼과 같은 방식).
+// 앞 장면 찾기(seek)가 끝난 뒤에 다음으로 가서, 폰에서도 화면이 멈추지 않고 한 장씩 넘어간다.
+const HOLD_DELAY_MS = 350;
+const HOLD_FRAME_MS = 60; // 1프레임 버튼: 초당 최대 약 16프레임
+const HOLD_SEC_MS = 250;  // 1초 버튼: 초당 4초
+let hold = null;
+
+// fn(first): first는 누른 순간(true)과 반복(false)을 구분한다 (되돌리기를 한 번에 묶을 때 쓴다)
+function holdable(el, fn, everyMs) {
+  el.addEventListener('pointerdown', (e) => {
+    if (!e.isPrimary || e.button > 0) return;
+    stopHold();
+    hold = { id: e.pointerId, fn, everyMs, timer: setTimeout(holdTick, HOLD_DELAY_MS) };
+    fn(true);
+  });
+  el.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (e.detail === 0) fn(true); // 키보드(Enter·Space)로 누른 경우만. 손가락·마우스는 pointerdown에서 이미 움직였다
+  });
+  el.addEventListener('contextmenu', (e) => e.preventDefault()); // 길게 눌러도 메뉴가 뜨지 않게
+  return el;
+}
+
+function holdTick() {
+  if (!hold) return;
+  if (video.seeking) { hold.timer = setTimeout(holdTick, 16); return; }
+  hold.fn(false);
+  hold.timer = setTimeout(holdTick, hold.everyMs);
+}
+
+function stopHold(e) {
+  if (!hold || (e && e.pointerId != null && e.pointerId !== hold.id)) return;
+  clearTimeout(hold.timer);
+  hold = null;
+}
+
 // ---------------------------------------------------------------- 재생
 
 function seek(sec) {
@@ -1223,17 +1261,22 @@ function renderMoments() {
 function renderEditRow() {
   const row = $('#editRow');
   const a = curAttempt();
-  if (!a || !S.selKey || a.events[S.selKey] == null) { row.hidden = true; return; }
+  if (!a || !S.selKey || a.events[S.selKey] == null) { row.hidden = true; delete row.dataset.key; return; }
   const k = S.selKey;
-  const t = a.events[k];
+  const name = `${S.cfg.eventShort[k]} ${fmt(a.events[k])} 고치기`;
   row.hidden = false;
+  // 같은 순간을 고치는 중이면 글자만 바꾼다. 꾹 누르는 중에 버튼을 새로 만들면 손을 뗀 걸 놓칠 수 있다
+  if (row.dataset.key === k) { row.querySelector('.edit-name').textContent = name; return; }
+  row.dataset.key = k;
+  // 버튼은 다시 그리지 않으니, 누를 때마다 지금 시도를 새로 찾는다
+  const ev = () => { const at = curAttempt(); return at ? at.events[k] : null; };
   row.replaceChildren(
-    h('span', { class: 'edit-name', style: `--c:${COLORS[k]}` }, `${S.cfg.eventShort[k]} ${fmt(t)} 고치기`),
+    h('span', { class: 'edit-name', style: `--c:${COLORS[k]}` }, name),
     h('div', { class: 'edit-btns' },
-      h('button', { class: 'btn', onclick: () => nudgeMoment(k, -1) }, '◀ 1프레임'),
-      h('button', { class: 'btn', onclick: () => nudgeMoment(k, 1) }, '1프레임 ▶'),
-      h('button', { class: 'btn', onclick: () => { video.pause(); seek(t / 1000); } }, '이 장면 보기'),
-      h('button', { class: 'btn', onclick: () => mutate(() => { a.events[k] = curMs(); }) }, '지금 시각으로'),
+      holdable(h('button', { class: 'btn hold', title: '꾹 누르면 계속' }, '◀ 1프레임'), (first) => nudgeMoment(k, -1, first), HOLD_FRAME_MS),
+      holdable(h('button', { class: 'btn hold', title: '꾹 누르면 계속' }, '1프레임 ▶'), (first) => nudgeMoment(k, 1, first), HOLD_FRAME_MS),
+      h('button', { class: 'btn', onclick: () => { const t = ev(); if (t == null) return; video.pause(); seek(t / 1000); } }, '이 장면 보기'),
+      h('button', { class: 'btn', onclick: () => { if (ev() != null) mutate(() => { curAttempt().events[k] = curMs(); }); } }, '지금 시각으로'),
       h('button', { class: 'btn danger', onclick: () => clearMoment(k) }, '지우기')));
 }
 
@@ -1536,7 +1579,7 @@ function showHelp() {
       h('td', {}, h('b', {}, S.cfg.eventNames[k])),
       h('td', { class: 'muted' }, S.cfg.eventHelp[k])))),
     h('p', {}, `탑을 양손으로 ${(S.cfg.sendHoldMs / 1000).toFixed(1)}초 넘게 잡으면 완등이에요. 이륙 없이 홀드만 만지면 '시도 아님'. 내가 본 결과와 다르면 '판정이 달라요'를 눌러요.`),
-    h('p', {}, '잘못 찍었으면 다시 누르면 지금 시각으로 바뀌고, 타임라인의 표시를 끌어 옮기거나 ◀ 1프레임 ▶로 미세 조정할 수 있어요. ↶ 버튼으로 되돌려요.'),
+    h('p', {}, '잘못 찍었으면 다시 누르면 지금 시각으로 바뀌고, 타임라인의 표시를 끌어 옮기거나 ◀ 1프레임 ▶로 미세 조정할 수 있어요. 1프레임·1초 버튼은 꾹 누르고 있으면 계속 움직여요. ↶ 버튼으로 되돌려요.'),
     h('details', {}, h('summary', {}, '키보드 단축키 (컴퓨터)'),
       h('p', { class: 'muted' }, 'Space 재생 · ←/→ 1프레임 · Shift+←/→ 1초 · ⌥+←/→ 5초 · S L T M R E 순간 찍기 · N 새 시도 · ↑/↓ 시도 선택 · 1·2 시작 홀드 · 3 탑 홀드 · [ ] 속도 · ⌘Z 되돌리기')),
     h('div', { class: 'modal-actions' }, h('button', { class: 'btn primary', onclick: closeModal }, '닫기')));
@@ -1710,8 +1753,6 @@ function bindUi() {
     if (act === 'open-file') openPicker();
     else if (act === 'next-video') nextVideo();
     else if (act === 'batch') showBatch();
-    else if (act === 'frame') stepFrames(n);
-    else if (act === 'sec') stepSeconds(n);
     else if (act === 'close-drawer') closeDrawer();
     else if (act === 'sync') { closeDrawer(); if (S.store.mode === 'github') S.store.sync(); else showSettings(); }
     else if (act === 'coverage') showCoverage();
@@ -1723,6 +1764,15 @@ function bindUi() {
     else if (act === 'zoom-out') zoomCenter(1 / 1.6);
     else if (act === 'zoom-reset') resetView();
   });
+  $$('[data-hold]').forEach((b) => {
+    const n = Number(b.dataset.n);
+    const frame = b.dataset.hold === 'frame';
+    holdable(b, frame ? () => stepFrames(n) : () => stepSeconds(n), frame ? HOLD_FRAME_MS : HOLD_SEC_MS);
+  });
+  window.addEventListener('pointerup', stopHold, true);
+  window.addEventListener('pointercancel', stopHold, true);
+  window.addEventListener('blur', () => stopHold());
+  document.addEventListener('visibilitychange', () => stopHold());
   $('#menuBtn').addEventListener('click', openDrawer);
   $('#drawer').addEventListener('click', (e) => { if (e.target.id === 'drawer') closeDrawer(); });
   $('#modal').addEventListener('click', (e) => { if (e.target.id === 'modal') closeModal(); });
@@ -1798,6 +1848,7 @@ function onKey(e) {
   if (c === 'Space') { e.preventDefault(); togglePlay(); }
   else if (c === 'ArrowLeft' || c === 'ArrowRight') {
     e.preventDefault();
+    if (e.repeat && video.seeking) return; // 꾹 누를 때 앞 장면이 나오기 전에 또 옮기면 화면이 멈춘 것처럼 보인다
     const dir = c === 'ArrowLeft' ? -1 : 1;
     if (e.shiftKey) stepSeconds(dir); else if (e.altKey) stepSeconds(5 * dir); else stepFrames(dir);
   } else if (c === 'ArrowUp' || c === 'ArrowDown') { e.preventDefault(); selectAttempt(S.ai + (c === 'ArrowUp' ? -1 : 1)); }
