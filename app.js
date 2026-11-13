@@ -285,7 +285,9 @@ function remember(fp, file, pickedAt) {
 /** 앱을 켤 때: 고른 영상 목록을 되살리고, 끝낸 영상·목록에 없는 영상의 복사본은 지운다 */
 async function restoreBatch() {
   const stored = Copies.supported ? await Copies.list() : new Set();
-  const listed = [...S.meta.values()].filter((m) => m.inList).sort((a, b) => (a.lastPicked || 0) - (b.lastPicked || 0));
+  // inList가 없는 항목은 이전 버전에서 고른 영상 → 목록에 되살린다 (복사본이 없어 '다시 골라야 열려요')
+  const listed = [...S.meta.values()].filter((m) => m.inList || (m.inList === undefined && m.lastPicked))
+    .sort((a, b) => (a.lastPicked || 0) - (b.lastPicked || 0));
   S.batch = listed.map((m) => ({ fp: m.fp, file: null, stored: stored.has(m.fp) }));
   for (const fp of stored) {
     const m = S.meta.get(fp);
