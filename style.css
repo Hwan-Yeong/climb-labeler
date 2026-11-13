@@ -87,9 +87,14 @@ button, input, select { font: inherit; color: inherit; }
   position: relative; width: 100%; height: 46vh; min-height: 240px;
   background: #000; border-radius: var(--radius); overflow: hidden;
 }
-.player video { width: 100%; height: 100%; object-fit: contain; display: block; }
-#overlay { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: manipulation; }
-#overlay.editing { touch-action: none; cursor: crosshair; }
+.player video { width: 100%; height: 100%; object-fit: contain; display: block; transform-origin: 0 0; }
+/* 영상 위 손가락 동작은 직접 처리한다: 두 손가락 확대, 확대 중 이동, 그 외 세로 끌기는 페이지 스크롤 */
+#overlay { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; }
+#overlay.editing { cursor: crosshair; }
+.zoom-ctl { position: absolute; top: 8px; right: 8px; display: flex; flex-direction: column; gap: 6px; }
+.zoom-ctl .btn { width: 42px; min-height: 42px; padding: 0; font-size: 18px; background: rgba(20, 22, 27, .72); backdrop-filter: blur(4px); }
+.zoom-ctl #zoomLevel { font-size: 13px; }
+.zoom-ctl.zoomed #zoomLevel { border-color: var(--accent); color: #cfe0ff; }
 .empty-state {
   position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 8px; padding: 20px; text-align: center; background: radial-gradient(circle at 50% 40%, #1f2633, #0b0c0f);

@@ -34,6 +34,11 @@
     <div class="player" id="player">
       <video id="video" playsinline preload="auto"></video>
       <canvas id="overlay"></canvas>
+      <div class="zoom-ctl" id="zoomCtl" hidden>
+        <button class="btn small" data-act="zoom-in" aria-label="확대" title="확대 (두 손가락 벌리기 · 휠 · +)">＋</button>
+        <button class="btn small" data-act="zoom-out" aria-label="축소" title="축소 (−)">－</button>
+        <button class="btn small" data-act="zoom-reset" id="zoomLevel" aria-label="원래 크기" title="원래 크기 (0)">1×</button>
+      </div>
       <div id="drawBar" class="draw-bar" hidden><span id="drawText"></span><button id="drawCancel" class="btn small">취소</button></div>
       <div id="emptyState" class="empty-state">
         <p class="empty-title">라벨링할 영상을 열어 주세요</p>

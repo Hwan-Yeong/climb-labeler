@@ -21,6 +21,7 @@ const S = {
   src: null, fp: null, label: null, pi: 0, ai: -1, selKey: null, tab: 'moments',
   draw: null, drag: null, undo: [], unsaved: false, typingSnap: false,
   fps: 30, fpsKnown: false, speedIdx: 2, objectUrl: null,
+  view: { s: 1, tx: 0, ty: 0 }, pointers: new Map(), pinch: null,
 };
 
 // ---------------------------------------------------------------- 도구
@@ -121,12 +122,44 @@ async function init() {
       const v = S.videos.find((x) => x.name === want) || S.videos.find((x) => stateOf(x.meta.fingerprint) !== 'done') || S.videos[0];
       await openServerVideo(v.name);
     }
-    if (location.protocol === 'https:' && 'serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+    setupUpdates();
   } catch (e) {
     banner('error', `시작하지 못했어요: ${e.message}`);
   }
   renderAll();
   setInterval(renderSync, 30000);
+}
+
+/** 앱 업데이트: 새 버전이 받아지면, 영상을 안 열었으면 바로 적용하고 열어 둔 상태면 배너로 묻는다 */
+function setupUpdates() {
+  const debug = new URLSearchParams(location.search).has('sw'); // 로컬 테스트용
+  if (!('serviceWorker' in navigator) || (location.protocol !== 'https:' && !debug)) return;
+  let applying = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!applying) return;
+    saveNow().finally(() => location.reload());
+  });
+  const offer = (w) => {
+    if (!navigator.serviceWorker.controller) return; // 첫 설치
+    const apply = () => { applying = true; w.postMessage('skipWaiting'); };
+    if (!S.src) { apply(); return; }
+    S.updateReady = apply;
+    showUpdateBanner();
+  };
+  navigator.serviceWorker.register('sw.js').then((reg) => {
+    if (reg.waiting) offer(reg.waiting);
+    reg.addEventListener('updatefound', () => {
+      const w = reg.installing;
+      if (w) w.addEventListener('statechange', () => { if (w.state === 'installed') offer(w); });
+    });
+  }).catch(() => {});
+}
+
+function showUpdateBanner() {
+  if (!S.updateReady || $('#updateBanner')) return;
+  $('#banners').append(h('div', { class: 'banner info', id: 'updateBanner' },
+    h('span', {}, '새 버전이 있어요. 적용하면 화면이 새로 고쳐져요 (라벨은 저장돼 있어요).'),
+    h('button', { class: 'btn small', onclick: () => S.updateReady() }, '지금 적용')));
 }
 
 async function detectServer() {
@@ -196,6 +229,9 @@ async function leaveVideo() {
 function setSource(src, url) {
   S.src = src;
   $('#banners').replaceChildren();
+  showUpdateBanner();
+  resetView();
+  $('#zoomCtl').hidden = false;
   video.src = url;
   video.playbackRate = SPEEDS[S.speedIdx];
   $('#emptyState').hidden = true;
@@ -384,6 +420,42 @@ function contentRect() {
   return { x: (cw - vw * s) / 2, y: (ch - vh * s) / 2, w: vw * s, h: vh * s };
 }
 
+// ---- 확대·이동: 영상만 CSS로 확대하고, 홀드 상자는 같은 변환으로 캔버스에 그린다 (선이 흐려지지 않게)
+const ZOOM_MAX = 8;
+
+/** 확대·이동이 반영된 영상 내용 영역 (캔버스 좌표) */
+function viewRect() {
+  const r = contentRect(), v = S.view;
+  return { x: r.x * v.s + v.tx, y: r.y * v.s + v.ty, w: r.w * v.s, h: r.h * v.s };
+}
+
+function applyView() {
+  const v = S.view, W = canvas.clientWidth, H = canvas.clientHeight;
+  v.s = clamp(v.s, 1, ZOOM_MAX);
+  v.tx = clamp(v.tx, W * (1 - v.s), 0);
+  v.ty = clamp(v.ty, H * (1 - v.s), 0);
+  video.style.transform = v.s === 1 ? '' : `translate(${v.tx}px, ${v.ty}px) scale(${v.s})`;
+  $('#zoomLevel').textContent = v.s === 1 ? '1×' : `${v.s.toFixed(1)}×`;
+  $('#zoomCtl').classList.toggle('zoomed', v.s > 1);
+  drawOverlay();
+}
+
+/** (px, py) 지점을 고정한 채로 배율을 factor배 */
+function zoomAt(px, py, factor) {
+  const v = S.view, ns = clamp(v.s * factor, 1, ZOOM_MAX);
+  v.tx = px - (px - v.tx) * (ns / v.s);
+  v.ty = py - (py - v.ty) * (ns / v.s);
+  v.s = ns;
+  applyView();
+}
+
+function zoomCenter(factor) { zoomAt(canvas.clientWidth / 2, canvas.clientHeight / 2, factor); }
+
+function resetView() {
+  S.view = { s: 1, tx: 0, ty: 0 };
+  applyView();
+}
+
 function holdList(p) {
   const out = p.startRois.map((r, i) => ({ roi: r, which: `s${i}`, name: p.startRois.length > 1 ? `시작 ${i + 1}` : '시작', color: START_COLOR }));
   if (p.topRoi) out.push({ roi: p.topRoi, which: 'top', name: '탑', color: TOP_COLOR });
@@ -405,7 +477,7 @@ function drawOverlay() {
   ctx.clearRect(0, 0, cw, ch);
   canvas.classList.toggle('editing', !!S.draw || S.tab === 'holds');
   if (!S.label) return;
-  const r = contentRect();
+  const r = viewRect();
   const t = curMs();
   const fixed = (S.label.tags.camera || 'FIXED') === 'FIXED';
   const editing = S.tab === 'holds' && !S.draw;
@@ -452,9 +524,15 @@ function canvasPoint(e) {
 }
 
 function hitTest(p) {
-  const r = contentRect();
+  const r = viewRect();
   const tol = matchMedia('(pointer: coarse)').matches ? 22 : 12;
   const holds = holdList(prob()).reverse();
+  // 상자 안쪽을 잡으면 옮기기 (작은 상자는 모서리 영역이 상자 전체를 덮어 옮길 수 없던 문제)
+  for (const hold of holds) {
+    const b = roiRect(hold.roi, r);
+    const inset = Math.min(tol, b.w / 4, b.h / 4);
+    if (p.x >= b.x + inset && p.x <= b.x + b.w - inset && p.y >= b.y + inset && p.y <= b.y + b.h - inset) return { mode: 'move', hold };
+  }
   for (const hold of holds) {
     const b = roiRect(hold.roi, r);
     const corners = { tl: [b.x, b.y], tr: [b.x + b.w, b.y], bl: [b.x, b.y + b.h], br: [b.x + b.w, b.y + b.h] };
@@ -481,7 +559,7 @@ function startDraw(kind, idx = 0) {
   video.pause();
   S.draw = { kind, idx };
   const what = kind === 'top' ? '탑 홀드' : idx ? '시작 홀드 2' : '시작 홀드';
-  $('#drawText').textContent = `영상 위 ${what}를 탭하거나 드래그하세요 · 지금 장면(${fmt(curMs())})에 표시돼요`;
+  $('#drawText').textContent = `영상 위 ${what}를 탭하거나 드래그하세요 · 작으면 두 손가락으로 확대 · 지금 장면(${fmt(curMs())})에 표시돼요`;
   $('#drawBar').hidden = false;
   drawOverlay();
 }
@@ -494,11 +572,12 @@ function cancelDraw() {
 }
 
 function finishDraw(d) {
-  const r = contentRect();
+  const r = viewRect();
   const x0 = Math.min(d.x0, d.x1), x1 = Math.max(d.x0, d.x1), y0 = Math.min(d.y0, d.y1), y1 = Math.max(d.y0, d.y1);
   let roi;
   if (x1 - x0 < 8 || y1 - y0 < 8) {
-    const side = 0.07 * Math.min(r.w, r.h);
+    // 탭: 화면 기준 크기의 상자 → 확대해서 탭하면 작은 홀드에 맞는 작은 상자
+    const side = 0.07 * Math.min(canvas.clientWidth, canvas.clientHeight);
     roi = { cx: (d.x0 - r.x) / r.w, cy: (d.y0 - r.y) / r.h, w: side / r.w, h: side / r.h };
   } else {
     roi = { cx: ((x0 + x1) / 2 - r.x) / r.w, cy: ((y0 + y1) / 2 - r.y) / r.h, w: (x1 - x0) / r.w, h: (y1 - y0) / r.h };
@@ -522,9 +601,23 @@ function clampRoi(roi) {
 function onCanvasDown(e) {
   if (!S.label) return;
   const p = canvasPoint(e);
+  S.pointers.set(e.pointerId, p);
+  canvas.setPointerCapture(e.pointerId);
+  if (S.pointers.size === 2) { // 두 손가락: 확대·축소·이동 (그리던 상자·옮기던 상자는 취소)
+    e.preventDefault();
+    if (S.drag && (S.drag.mode === 'move' || S.drag.mode === 'resize')) {
+      Object.assign(holdRef(S.drag.which), S.drag.orig);
+      S.undo.pop();
+    }
+    S.drag = null;
+    const [a, b] = [...S.pointers.values()];
+    S.pinch = { d0: Math.hypot(a.x - b.x, a.y - b.y) || 1, mid0: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, s0: S.view.s, tx0: S.view.tx, ty0: S.view.ty };
+    drawOverlay();
+    return;
+  }
+  if (S.pointers.size > 2) return;
   if (S.draw) {
     e.preventDefault();
-    canvas.setPointerCapture(e.pointerId);
     S.drag = { mode: 'draw', x0: p.x, y0: p.y, x1: p.x, y1: p.y };
     drawOverlay();
     return;
@@ -533,25 +626,38 @@ function onCanvasDown(e) {
     const hit = hitTest(p);
     if (hit) {
       e.preventDefault();
-      canvas.setPointerCapture(e.pointerId);
       pushUndo();
       S.drag = { mode: hit.mode, corner: hit.corner, which: hit.hold.which, start: p, orig: Object.assign({}, hit.hold.roi) };
       return;
     }
   }
-  S.drag = { mode: 'tap', start: p };
+  // 한 손가락: 확대 중이면 화면 이동, 아니면(터치) 페이지 스크롤 · 움직이지 않고 떼면 재생/정지
+  S.drag = { mode: 'tap', start: p, tx0: S.view.tx, ty0: S.view.ty, lastY: e.clientY, moved: false, touch: e.pointerType === 'touch' };
 }
 
 function onCanvasMove(e) {
+  if (!S.pointers.has(e.pointerId)) return;
+  const p = canvasPoint(e);
+  S.pointers.set(e.pointerId, p);
+  if (S.pinch && S.pointers.size >= 2) {
+    const [a, b] = [...S.pointers.values()];
+    const pc = S.pinch;
+    const ns = clamp((pc.s0 * (Math.hypot(a.x - b.x, a.y - b.y) || 1)) / pc.d0, 1, ZOOM_MAX);
+    const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    S.view.s = ns;
+    S.view.tx = mid.x - (pc.mid0.x - pc.tx0) * (ns / pc.s0);
+    S.view.ty = mid.y - (pc.mid0.y - pc.ty0) * (ns / pc.s0);
+    applyView();
+    return;
+  }
   const d = S.drag;
   if (!d) return;
-  const p = canvasPoint(e);
   if (d.mode === 'draw') {
     d.x1 = p.x;
     d.y1 = p.y;
     drawOverlay();
   } else if (d.mode === 'move' || d.mode === 'resize') {
-    const r = contentRect();
+    const r = viewRect();
     const dx = (p.x - d.start.x) / r.w, dy = (p.y - d.start.y) / r.h;
     const o = d.orig;
     let roi;
@@ -566,19 +672,42 @@ function onCanvasMove(e) {
     }
     Object.assign(holdRef(d.which), clampRoi(roi));
     drawOverlay();
+  } else if (d.mode === 'tap') {
+    const dx = p.x - d.start.x, dy = p.y - d.start.y;
+    if (!d.moved && Math.hypot(dx, dy) < 10) return;
+    d.moved = true;
+    if (S.view.s > 1) {
+      S.view.tx = d.tx0 + dx;
+      S.view.ty = d.ty0 + dy;
+      applyView();
+    } else if (d.touch) {
+      window.scrollBy(0, d.lastY - e.clientY);
+    }
+    d.lastY = e.clientY;
   }
 }
 
 function onCanvasUp(e) {
+  S.pointers.delete(e.pointerId);
+  if (S.pinch) { // 두 손가락을 떼는 동안에는 탭으로 보지 않는다
+    if (S.pointers.size < 2) S.pinch = null;
+    S.drag = null;
+    return;
+  }
   const d = S.drag;
   S.drag = null;
   if (!d) return;
-  if (d.mode === 'draw') finishDraw(d);
-  else if (d.mode === 'move' || d.mode === 'resize') { scheduleSave(); renderLabel(); }
-  else if (d.mode === 'tap' && e.type === 'pointerup') {
-    const p = canvasPoint(e);
-    if (Math.hypot(p.x - d.start.x, p.y - d.start.y) < 10) togglePlay();
-  }
+  if (d.mode === 'draw') {
+    if (e.type === 'pointerup') finishDraw(d); else drawOverlay();
+  } else if (d.mode === 'move' || d.mode === 'resize') { scheduleSave(); renderLabel(); }
+  else if (d.mode === 'tap' && e.type === 'pointerup' && !d.moved) togglePlay();
+}
+
+function onCanvasWheel(e) {
+  if (!S.label) return;
+  e.preventDefault();
+  const p = canvasPoint(e);
+  zoomAt(p.x, p.y, Math.exp(-e.deltaY * 0.002));
 }
 
 // ---------------------------------------------------------------- 재생
@@ -1314,6 +1443,9 @@ function bindUi() {
     else if (act === 'export') exportLabels();
     else if (act === 'import') { closeDrawer(); $('#importPicker').click(); }
     else if (act === 'settings') showSettings();
+    else if (act === 'zoom-in') zoomCenter(1.6);
+    else if (act === 'zoom-out') zoomCenter(1 / 1.6);
+    else if (act === 'zoom-reset') resetView();
   });
   $('#menuBtn').addEventListener('click', openDrawer);
   $('#drawer').addEventListener('click', (e) => { if (e.target.id === 'drawer') closeDrawer(); });
@@ -1360,10 +1492,11 @@ function bindUi() {
   canvas.addEventListener('pointermove', onCanvasMove);
   canvas.addEventListener('pointerup', onCanvasUp);
   canvas.addEventListener('pointercancel', onCanvasUp);
+  canvas.addEventListener('wheel', onCanvasWheel, { passive: false });
   scrubFrom(timeline, () => [0, durMs()]);
   scrubFrom($('#zoomRail'), () => zoomRange() || [0, durMs()]);
 
-  window.addEventListener('resize', () => { drawOverlay(); renderTimeline(); });
+  window.addEventListener('resize', () => { applyView(); renderTimeline(); });
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) { saveNow(); if (S.store) S.store.sync(); }
   });
@@ -1399,6 +1532,9 @@ function onKey(e) {
   else if (c === 'Digit1') { switchTab('holds'); startDraw('start', 0); }
   else if (c === 'Digit2') { switchTab('holds'); startDraw('start', 1); }
   else if (c === 'Digit3') { switchTab('holds'); startDraw('top'); }
+  else if (c === 'Equal' || c === 'NumpadAdd') zoomCenter(1.6);
+  else if (c === 'Minus' || c === 'NumpadSubtract') zoomCenter(1 / 1.6);
+  else if (c === 'Digit0') resetView();
 }
 
 init();
