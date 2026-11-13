@@ -12,20 +12,22 @@
 
   function openDb() {
     return new Promise((resolve, reject) => {
-      const req = indexedDB.open(DB_NAME, 1);
+      const req = indexedDB.open(DB_NAME, 2);
       req.onupgradeneeded = () => {
         const db = req.result;
         if (!db.objectStoreNames.contains('labels')) db.createObjectStore('labels', { keyPath: 'fp' });
+        // 영상 정보(썸네일·길이·고른 시각) — 이 기기에서만 쓰고 GitHub에는 올리지 않는다
+        if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta', { keyPath: 'fp' });
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
     });
   }
 
-  function idb(db, mode, fn) {
+  function idb(db, mode, fn, store = 'labels') {
     return new Promise((resolve, reject) => {
-      const t = db.transaction('labels', mode);
-      const req = fn(t.objectStore('labels'));
+      const t = db.transaction(store, mode);
+      const req = fn(t.objectStore(store));
       let out;
       if (req) req.onsuccess = () => { out = req.result; };
       t.oncomplete = () => resolve(out);
@@ -139,6 +141,12 @@
     async put(e) { await idb(this.db, 'readwrite', (s) => s.put(e)); }
 
     async remove(fp) { await idb(this.db, 'readwrite', (s) => s.delete(fp)); }
+
+    async meta(fp) { return (await idb(this.db, 'readonly', (s) => s.get(fp), 'meta')) || null; }
+
+    async putMeta(m) { await idb(this.db, 'readwrite', (s) => s.put(m), 'meta'); }
+
+    async allMeta() { return (await idb(this.db, 'readonly', (s) => s.getAll(), 'meta')) || []; }
 
     async refreshPending() {
       this.status.pending = (await this.entries()).filter((e) => e.dirty).length;

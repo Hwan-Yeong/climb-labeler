@@ -22,6 +22,7 @@ const S = {
   draw: null, drag: null, undo: [], unsaved: false, typingSnap: false,
   fps: 30, fpsKnown: false, speedIdx: 2, objectUrl: null,
   view: { s: 1, tx: 0, ty: 0 }, pointers: new Map(), pinch: null,
+  batch: [], meta: new Map(), batchOpen: false,
 };
 
 // ---------------------------------------------------------------- 도구
@@ -184,6 +185,7 @@ async function afterConnect() {
   }
   const all = await S.store.refreshAll();
   S.labels = new Map(all.filter((l) => l && l.video && l.video.fingerprint).map((l) => [l.video.fingerprint, l]));
+  S.meta = new Map((await S.store.allMeta()).map((m) => [m.fp, m]));
   await S.store.refreshPending();
   renderTagOptions();
   renderList();
@@ -205,11 +207,11 @@ async function openServerVideo(name) {
   if (v.meta.startTimeMs) banner('warn', `이 영상은 시작 시각이 0이 아니에요(${v.meta.startTimeMs}ms). 앱 분석 시각과 조금 어긋날 수 있어요.`);
 }
 
-async function openFile(file) {
+async function openFile(file, knownFp) {
   if (!file) return;
   await leaveVideo();
   toast('영상 확인 중…');
-  const fp = await Rules.fingerprintBlob(file);
+  const fp = knownFp || await Rules.fingerprintBlob(file);
   if (S.objectUrl) URL.revokeObjectURL(S.objectUrl);
   S.objectUrl = URL.createObjectURL(file);
   setSource({ kind: 'file', name: file.name, meta: {} }, S.objectUrl);
@@ -217,7 +219,130 @@ async function openFile(file) {
   S.fpsKnown = false;
   startFpsProbe();
   await loadLabel(fp, file.name, {});
-  toast(S.labels.has(fp) ? '전에 하던 라벨을 이어서 열었어요' : '새 영상이에요 — 홀드부터 표시해요');
+  const st = S.labels.has(fp) ? Rules.labelStatus(S.labels.get(fp), S.cfg) : null;
+  toast(!st ? '새 영상이에요 — 홀드부터 표시해요'
+    : st.state === 'done' ? `✓ 이미 끝낸 영상이에요 (시도 ${st.attempts}개) — 고칠 게 없으면 '다음 영상'`
+      : '입력 중이던 영상이에요 — 이어서 해요');
+  remember(fp, file, false);
+  makeThumbs([{ file, fp }]);
+}
+
+// ---------------------------------------------------------------- 고른 영상 (여러 개 고르기 · 상태 구분)
+
+/** 사진 선택기에서 고른 영상들: 지문으로 상태(안 함/입력 중/끝남)를 붙여 목록으로 보여 준다 */
+async function onFilesPicked(files) {
+  if (!files.length) return;
+  const items = [];
+  for (let i = 0; i < files.length; i++) {
+    if (files.length > 1) toast(`영상 확인 중 ${i + 1}/${files.length}`);
+    items.push({ file: files[i], fp: await Rules.fingerprintBlob(files[i]) });
+  }
+  for (const it of items) {
+    const ex = S.batch.find((b) => b.fp === it.fp);
+    if (ex) ex.file = it.file; else S.batch.push(it);
+    remember(it.fp, it.file, true);
+  }
+  renderList();
+  if (items.length === 1) await openFile(items[0].file, items[0].fp);
+  else { showBatch(); makeThumbs(items); }
+}
+
+function remember(fp, file, picked) {
+  const m = S.meta.get(fp) || { fp };
+  m.name = file.name;
+  m[picked ? 'lastPicked' : 'lastOpened'] = Date.now();
+  S.meta.set(fp, m);
+  S.store.putMeta(m);
+}
+
+const STATE_ORDER = { todo: 0, doing: 1, done: 2 };
+
+function itemName(fp, fallback) {
+  const m = S.meta.get(fp) || {};
+  const l = S.labels.get(fp);
+  return videoName(m.name || (l && l.video.file) || fallback || '영상', m.durationMs || (l && l.video.durationMs));
+}
+
+function thumbEl(fp) {
+  const m = S.meta.get(fp);
+  return m && m.thumb ? h('img', { class: 'thumb', src: m.thumb, alt: '' }) : h('span', { class: 'thumb empty' }, '🎬');
+}
+
+function stateChip(fp) {
+  const l = S.labels.get(fp);
+  const st = l ? Rules.labelStatus(l, S.cfg) : null;
+  const state = st ? st.state : 'todo';
+  return h('span', { class: `state ${state}` }, STATE_NAMES[state] + (st && st.attempts ? ` · 시도 ${st.attempts}` : ''));
+}
+
+function sortedBatch() {
+  return S.batch.map((b, i) => ({ b, i })).sort((x, y) => (STATE_ORDER[stateOf(x.b.fp)] - STATE_ORDER[stateOf(y.b.fp)]) || (x.i - y.i)).map((x) => x.b);
+}
+
+function showBatch() {
+  closeDrawer();
+  if (!S.batch.length) { openPicker(); return; }
+  const count = { todo: 0, doing: 0, done: 0 };
+  for (const b of S.batch) count[stateOf(b.fp)]++;
+  S.batchOpen = true;
+  openModal(
+    h('h2', {}, `고른 영상 ${S.batch.length}개`),
+    h('p', { class: 'batch-summary' },
+      h('span', { class: 'state todo' }, `안 함 ${count.todo}`), ' ',
+      h('span', { class: 'state doing' }, `입력 중 ${count.doing}`), ' ',
+      h('span', { class: 'state done' }, `끝남 ${count.done}`)),
+    h('ul', { class: 'batch-list' }, sortedBatch().map((b) => h('li', {
+      class: `batch-row${b.fp === S.fp ? ' active' : ''}`,
+      onclick: () => { S.batchOpen = false; closeModal(); if (b.fp !== S.fp) openFile(b.file, b.fp); },
+    }, thumbEl(b.fp), h('span', { class: 'v-name' }, itemName(b.fp, b.file.name)), stateChip(b.fp)))),
+    h('div', { class: 'modal-actions' },
+      h('button', { class: 'btn', onclick: () => { S.batchOpen = false; closeModal(); openPicker(); } }, '영상 더 고르기'),
+      h('button', { class: 'btn primary', onclick: () => { S.batchOpen = false; closeModal(); } }, '닫기')));
+}
+
+/** 썸네일·길이를 하나씩 만든다 (목록에서 영상을 알아보기 쉽게, 이 기기에만 저장) */
+let thumbQueue = Promise.resolve();
+function makeThumbs(items) {
+  for (const it of items) {
+    thumbQueue = thumbQueue.then(async () => {
+      const m = S.meta.get(it.fp) || { fp: it.fp };
+      if (m.thumb && m.durationMs) return;
+      const r = await grabThumb(it.file);
+      if (!r) return;
+      Object.assign(m, r);
+      S.meta.set(it.fp, m);
+      await S.store.putMeta(m);
+      renderList();
+      if (S.batchOpen && !$('#modal').hidden) showBatch();
+      if (it.fp === S.fp) renderLabel();
+    });
+  }
+}
+
+function grabThumb(file) {
+  return new Promise((resolve) => {
+    const v = document.createElement('video');
+    const url = URL.createObjectURL(file);
+    let timer = null;
+    const finish = (val) => { clearTimeout(timer); URL.revokeObjectURL(url); v.removeAttribute('src'); v.load(); resolve(val); };
+    timer = setTimeout(() => finish(null), 10000);
+    v.muted = true;
+    v.playsInline = true;
+    v.preload = 'auto';
+    v.addEventListener('loadedmetadata', () => { v.currentTime = Math.min(1.5, (v.duration || 3) / 3); }, { once: true });
+    v.addEventListener('seeked', () => {
+      try {
+        const hh = 128, ww = Math.max(1, Math.round((hh * v.videoWidth) / v.videoHeight)) || 96;
+        const c = document.createElement('canvas');
+        c.width = ww;
+        c.height = hh;
+        c.getContext('2d').drawImage(v, 0, 0, ww, hh);
+        finish({ thumb: c.toDataURL('image/jpeg', 0.6), durationMs: Math.round(v.duration * 1000) });
+      } catch (_) { finish(null); }
+    }, { once: true });
+    v.addEventListener('error', () => finish(null), { once: true });
+    v.src = url;
+  });
 }
 
 async function leaveVideo() {
@@ -899,7 +1024,7 @@ function renderAll() {
 
 function renderLabel() {
   $('#videoTitle').textContent = S.label
-    ? videoName(S.label.video.file, S.label.video.durationMs || (video.duration ? video.duration * 1000 : null))
+    ? videoName(S.label.video.file, S.label.video.durationMs || (video.duration ? video.duration * 1000 : (S.meta.get(S.fp) || {}).durationMs))
     : (S.src ? S.src.name : '');
   $('#undoBtn').disabled = !S.undo.length;
   renderAttemptBar();
@@ -1161,17 +1286,33 @@ function renderList() {
         h('span', { class: `state ${st}` }, STATE_NAMES[st]));
     });
   } else {
-    const labels = [...S.labels.values()].sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
-    const done = labels.filter((l) => Rules.labelStatus(l, S.cfg).state === 'done').length;
-    progress = labels.length ? `라벨 ${labels.length}개 · ${done}개 끝남` : '아직 라벨이 없어요';
-    items = labels.map((l) => {
-      const st = Rules.labelStatus(l, S.cfg).state;
-      return h('li', {
-        class: `video-item${S.fp === l.video.fingerprint ? ' active' : ''}`,
-        title: '이어서 하려면 같은 영상을 다시 골라 주세요',
-        onclick: () => { if (S.fp !== l.video.fingerprint) { toast(`'${labelName(l)}'을(를) 다시 골라 주세요 — 고르면 라벨이 이어져요`); openPicker(); } },
-      }, h('span', { class: 'v-name' }, labelName(l)), h('span', { class: `state ${st}` }, STATE_NAMES[st]));
-    });
+    items = [];
+    const inBatch = new Set(S.batch.map((b) => b.fp));
+    if (S.batch.length) {
+      const done = S.batch.filter((b) => stateOf(b.fp) === 'done').length;
+      progress = `고른 영상 ${S.batch.length}개 중 ${done}개 끝남`;
+      for (const b of sortedBatch()) {
+        items.push(h('li', { class: `video-item${S.fp === b.fp ? ' active' : ''}`, onclick: () => { if (S.fp !== b.fp) openFile(b.file, b.fp); } },
+          thumbEl(b.fp), h('span', { class: 'v-name' }, itemName(b.fp, b.file.name)), stateChip(b.fp)));
+      }
+    }
+    const older = [...S.labels.values()].filter((l) => !inBatch.has(l.video.fingerprint))
+      .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+    if (!S.batch.length) {
+      const done = older.filter((l) => Rules.labelStatus(l, S.cfg).state === 'done').length;
+      progress = older.length ? `라벨 ${older.length}개 · ${done}개 끝남 — 영상 열기에서 여러 개를 한꺼번에 고르면 안 한 것을 골라 줘요` : '영상 열기에서 여러 개를 한꺼번에 골라도 돼요';
+    }
+    if (older.length) {
+      items.push(h('li', { class: 'list-head' }, '전에 라벨한 영상 — 다시 고르면 이어져요'));
+      for (const l of older) {
+        const fp = l.video.fingerprint;
+        items.push(h('li', {
+          class: `video-item${S.fp === fp ? ' active' : ''}`,
+          title: '이어서 하려면 같은 영상을 다시 골라 주세요',
+          onclick: () => { if (S.fp !== fp) { toast(`'${itemName(fp, l.video.file)}'을(를) 다시 골라 주세요 — 고르면 라벨이 이어져요`); openPicker(); } },
+        }, thumbEl(fp), h('span', { class: 'v-name' }, itemName(fp, l.video.file)), stateChip(fp)));
+      }
+    }
   }
   for (const slot of $$('[data-slot=progress]')) slot.textContent = progress;
   for (const slot of $$('[data-slot=videos]')) slot.replaceChildren(...items.map((li) => li.cloneNode(true)));
@@ -1197,7 +1338,15 @@ function closeDrawer() { $('#drawer').hidden = true; }
 
 function nextVideo() {
   closeDrawer();
-  if (!S.server) { openPicker(); return; }
+  if (!S.server) {
+    const idx = S.batch.findIndex((b) => b.fp === S.fp);
+    const order = S.batch.slice(idx + 1).concat(S.batch.slice(0, Math.max(0, idx)));
+    const next = order.find((b) => b.fp !== S.fp && stateOf(b.fp) !== 'done');
+    if (next) openFile(next.file, next.fp);
+    else if (S.batch.length) { toast('고른 영상을 다 끝냈어요 🎉 — 더 하려면 영상 열기'); showBatch(); }
+    else openPicker();
+    return;
+  }
   const idx = S.videos.findIndex((v) => S.src && v.name === S.src.name);
   const order = S.videos.slice(idx + 1).concat(S.videos.slice(0, Math.max(0, idx)));
   const next = order.find((v) => stateOf(v.meta.fingerprint) !== 'done');
@@ -1441,6 +1590,7 @@ function bindUi() {
     const n = Number(el.dataset.n || 0);
     if (act === 'open-file') openPicker();
     else if (act === 'next-video') nextVideo();
+    else if (act === 'batch') showBatch();
     else if (act === 'frame') stepFrames(n);
     else if (act === 'sec') stepSeconds(n);
     else if (act === 'close-drawer') closeDrawer();
@@ -1462,7 +1612,7 @@ function bindUi() {
   $('#playBtn').addEventListener('click', togglePlay);
   $('#speedBtn').addEventListener('click', () => setSpeed((S.speedIdx + 1) % SPEEDS.length));
   $('#drawCancel').addEventListener('click', cancelDraw);
-  $('#filePicker').addEventListener('change', (e) => { openFile(e.target.files[0]); e.target.value = ''; });
+  $('#filePicker').addEventListener('change', (e) => { onFilesPicked(Array.from(e.target.files)); e.target.value = ''; });
   $('#importPicker').addEventListener('change', (e) => { importLabels(e.target.files[0]); e.target.value = ''; });
   $$('.tab').forEach((b) => b.addEventListener('click', () => switchTab(b.dataset.tab)));
   $('#problemName').addEventListener('focus', () => { S.typingSnap = false; });
