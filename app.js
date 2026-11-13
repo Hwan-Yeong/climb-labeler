@@ -9,6 +9,7 @@ const START_COLOR = '#3ddc84';
 const TOP_COLOR = '#ff9f1a';
 const KEY_CODES = { KeyS: 'S', KeyL: 'L', KeyT: 'T', KeyM: 'M', KeyR: 'R', KeyE: 'E' };
 const TOKEN_URL = 'https://github.com/settings/personal-access-tokens/new';
+const REPO_HINT_KEY = 'climb-labeler:repo';
 
 const video = $('#video');
 const canvas = $('#overlay');
@@ -83,7 +84,32 @@ function banner(kind, text, actionLabel, onAction) {
 
 // ---------------------------------------------------------------- 시작
 
+function rememberRepoHint() {
+  // 링크(#repo=…)로 한 번 들어오면 기억 → 홈 화면 앱(주소에 #repo 없음)에서도 저장소 칸이 채워진다
+  const repo = new URLSearchParams(location.hash.slice(1)).get('repo');
+  if (repo) { try { localStorage.setItem(REPO_HINT_KEY, repo); } catch (_) { /* 저장 공간 막힘 */ } }
+}
+
+function repoHint() {
+  try { return localStorage.getItem(REPO_HINT_KEY) || ''; } catch (_) { return ''; }
+}
+
+/** 폰 사진 선택기는 파일 이름 대신 갤러리 번호(1000065656.mp4)를 준다 → 촬영 시각·길이로 보여 준다 */
+function videoName(file, takenAt, durationMs) {
+  if (!/^\d+\.(mp4|mov|m4v)$/i.test(file || '')) return file || '영상';
+  const parts = [];
+  if (takenAt) {
+    const d = new Date(takenAt);
+    parts.push(`${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`);
+  }
+  if (durationMs) parts.push(`${Math.round(durationMs / 1000)}초`);
+  return parts.length ? `영상 ${parts.join(' · ')}` : file;
+}
+
+const labelName = (l) => videoName(l.video.file, l.video.takenAt, l.video.durationMs);
+
 async function init() {
+  rememberRepoHint();
   bindUi();
   try {
     const settings = Store.loadSettings();
@@ -162,6 +188,8 @@ async function openFile(file) {
   S.fpsKnown = false;
   startFpsProbe();
   await loadLabel(fp, file.name, {});
+  if (!S.label.video.takenAt && file.lastModified) S.label.video.takenAt = file.lastModified;
+  renderLabel();
   toast(S.labels.has(fp) ? '전에 하던 라벨을 이어서 열었어요' : '새 영상이에요 — 홀드부터 표시해요');
 }
 
@@ -747,7 +775,9 @@ function renderAll() {
 }
 
 function renderLabel() {
-  $('#videoTitle').textContent = S.src ? S.src.name : '';
+  $('#videoTitle').textContent = S.label
+    ? videoName(S.label.video.file, S.label.video.takenAt, S.label.video.durationMs || (video.duration ? video.duration * 1000 : null))
+    : (S.src ? S.src.name : '');
   $('#undoBtn').disabled = !S.undo.length;
   renderAttemptBar();
   renderVerdict();
@@ -1016,8 +1046,8 @@ function renderList() {
       return h('li', {
         class: `video-item${S.fp === l.video.fingerprint ? ' active' : ''}`,
         title: '이어서 하려면 같은 영상을 다시 골라 주세요',
-        onclick: () => { if (S.fp !== l.video.fingerprint) { toast(`'${l.video.file}'을(를) 다시 골라 주세요 — 고르면 라벨이 이어져요`); openPicker(); } },
-      }, h('span', { class: 'v-name' }, l.video.file || '영상'), h('span', { class: `state ${st}` }, STATE_NAMES[st]));
+        onclick: () => { if (S.fp !== l.video.fingerprint) { toast(`'${labelName(l)}'을(를) 다시 골라 주세요 — 고르면 라벨이 이어져요`); openPicker(); } },
+      }, h('span', { class: 'v-name' }, labelName(l)), h('span', { class: `state ${st}` }, STATE_NAMES[st]));
     });
   }
   for (const slot of $$('[data-slot=progress]')) slot.textContent = progress;
@@ -1144,7 +1174,7 @@ function showCoverage() {
 
 function connectForm(onDone) {
   const params = new URLSearchParams(location.hash.slice(1));
-  const repo = h('input', { class: 'input', placeholder: '계정/저장소 이름', value: params.get('repo') || (S.server && S.server.labelsRepo) || (S.store.settings && S.store.settings.repo) || '' });
+  const repo = h('input', { class: 'input', placeholder: '계정/저장소 이름', value: params.get('repo') || repoHint() || (S.server && S.server.labelsRepo) || (S.store.settings && S.store.settings.repo) || '' });
   const token = h('input', { class: 'input', type: 'password', placeholder: '토큰 붙여 넣기 (github_pat_…)', autocomplete: 'off' });
   const msg = h('p', { class: 'form-msg' });
   const go = h('button', { class: 'btn primary wide' }, '연결하기');
@@ -1236,7 +1266,7 @@ function resolveConflict(mine, theirs) {
     const when = (l) => (l.updatedAt ? new Date(l.updatedAt).toLocaleString('ko-KR') : '알 수 없음');
     openModal(
       h('h2', {}, '다른 기기에서도 이 영상 라벨을 고쳤어요'),
-      h('p', {}, `영상: ${mine.video.file}`),
+      h('p', {}, `영상: ${labelName(mine)}`),
       h('p', { class: 'muted' }, `이 기기: ${when(mine)} · 다른 기기: ${when(theirs)}`),
       h('div', { class: 'modal-actions' },
         h('button', { class: 'btn', onclick: () => done('theirs') }, '다른 기기 것 받기'),
@@ -1322,7 +1352,7 @@ function bindUi() {
     });
   }
 
-  video.addEventListener('loadedmetadata', () => { renderTimeline(); drawOverlay(); });
+  video.addEventListener('loadedmetadata', () => { renderLabel(); drawOverlay(); });
   video.addEventListener('play', () => { $('#playBtn').textContent = '❚❚'; requestAnimationFrame(frameLoop); });
   video.addEventListener('pause', () => { $('#playBtn').textContent = '▶'; updateTime(); });
   video.addEventListener('seeked', updateTime);
