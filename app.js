@@ -1302,14 +1302,21 @@ function connectForm(onDone) {
   const msg = h('p', { class: 'form-msg' });
   const go = h('button', { class: 'btn primary wide' }, '연결하기');
   go.onclick = async () => {
+    const repoName = repo.value.replace(/\s+/g, '');
+    const tok = token.value.replace(/\s+/g, ''); // 폰에서 복사하면 줄바꿈·공백이 섞이기도 한다
+    const fail = (text) => { msg.textContent = text; msg.className = 'form-msg error'; };
+    if (!/^[\w.-]+\/[\w.-]+$/.test(repoName)) { fail("저장소는 '계정/저장소' 형식으로 써 주세요 (예: name/labels)"); return; }
+    if (!tok) { fail('토큰을 붙여 넣어 주세요'); return; }
+    if (/[^\x21-\x7e]/.test(tok)) { fail('토큰에 다른 글자가 섞였어요. GitHub에서 토큰을 다시 복사해 붙여 넣어 주세요.'); return; }
     go.disabled = true;
     msg.textContent = '확인 중…';
     msg.className = 'form-msg';
-    const res = await Store.checkConnection(repo.value.trim(), token.value.trim());
+    const res = await Store.checkConnection(repoName, tok);
     go.disabled = false;
     if (!res.ok) { msg.textContent = res.message; msg.className = 'form-msg error'; return; }
     Store.saveSettings(res.settings);
     S.store.settings = res.settings;
+    renderSync();
     const pending = (await S.store.entries()).filter((e) => e.dirty).length;
     if (pending && !confirm(`이 기기에서 만든 라벨 ${pending}개를 저장소에 올릴까요?\n취소하면 지워져요.`)) await S.store.discardPending();
     onDone();

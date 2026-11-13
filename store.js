@@ -70,8 +70,10 @@
 
   async function gh(settings, method, path, body) {
     let res;
+    // 주의: 주소 끝에 '/'가 붙으면 GitHub가 CORS 사전 요청에 404를 돌려줘 브라우저가 요청을 막는다
+    const url = `${API}/repos/${settings.repo}${path ? `/${path}` : ''}`;
     try {
-      res = await fetch(`${API}/repos/${settings.repo}/${path}`, {
+      res = await fetch(url, {
         method,
         cache: 'no-store',
         headers: Object.assign(
@@ -81,8 +83,10 @@
         body: body ? JSON.stringify(body) : undefined,
       });
     } catch (e) {
-      const err = new Error('인터넷에 연결되지 않았어요');
-      err.offline = true;
+      // 요청이 아예 실패: 오프라인이거나, 브라우저가 막음(네트워크·보안 정책)
+      const offline = !navigator.onLine;
+      const err = new Error(offline ? '인터넷에 연결되지 않았어요' : `GitHub에 연결하지 못했어요 (${e.message}). 잠시 뒤 다시 시도해 주세요.`);
+      err.offline = offline;
       throw err;
     }
     if (res.status === 404) return null;
