@@ -117,6 +117,7 @@ async function init() {
     S.server = await detectServer();
     if (S.server) S.videos = await (await fetch('api/videos', { cache: 'no-store' })).json();
     await afterConnect();
+    await restoreBatch();
     if (!settings) showOnboarding();
     else if (S.server && S.videos.length) {
       const want = new URLSearchParams(location.hash.slice(1)).get('v');
@@ -229,7 +230,29 @@ async function openFile(file, knownFp) {
 
 // ---------------------------------------------------------------- 고른 영상 (여러 개 고르기 · 상태 구분)
 
-/** 사진 선택기에서 고른 영상들: 지문으로 상태(안 함/입력 중/끝남)를 붙여 목록으로 보여 준다 */
+// 고른 영상은 이 폰의 앱 전용 저장 공간(OPFS)에 복사해 둔다 → 새로 고치거나 다시 켜도 목록이 남고 바로 열린다.
+// (사진 선택기로 고른 파일은 새로 고치면 다시 열 수 없다.) 끝낸 영상의 복사본은 지워 공간을 아낀다. 갤러리 원본은 건드리지 않는다.
+const Copies = {
+  supported: !!(navigator.storage && navigator.storage.getDirectory),
+  async dir() { return (await navigator.storage.getDirectory()).getDirectoryHandle('videos', { create: true }); },
+  async save(fp, file) {
+    const fh = await (await this.dir()).getFileHandle(`${fp}.mp4`, { create: true });
+    if ((await fh.getFile()).size === file.size) return;
+    const w = await fh.createWritable();
+    try { await file.stream().pipeTo(w); } catch (e) { await this.remove(fp); throw e; }
+  },
+  async open(fp) {
+    try { return await (await (await this.dir()).getFileHandle(`${fp}.mp4`)).getFile(); } catch (_) { return null; }
+  },
+  async remove(fp) { try { await (await this.dir()).removeEntry(`${fp}.mp4`); } catch (_) { /* 없음 */ } },
+  async list() {
+    const out = new Set();
+    try { for await (const name of (await this.dir()).keys()) out.add(name.replace(/\.mp4$/, '')); } catch (_) { /* 미지원 */ }
+    return out;
+  },
+};
+
+/** 사진 선택기에서 고른 영상들: 지문으로 상태(안 함/입력 중/끝남)를 붙여 목록으로 보여 주고, 기기에 복사해 둔다 */
 async function onFilesPicked(files) {
   if (!files.length) return;
   const items = [];
@@ -237,22 +260,58 @@ async function onFilesPicked(files) {
     if (files.length > 1) toast(`영상 확인 중 ${i + 1}/${files.length}`);
     items.push({ file: files[i], fp: await Rules.fingerprintBlob(files[i]) });
   }
-  for (const it of items) {
+  const base = Date.now();
+  items.forEach((it, i) => {
     const ex = S.batch.find((b) => b.fp === it.fp);
-    if (ex) ex.file = it.file; else S.batch.push(it);
-    remember(it.fp, it.file, true);
-  }
+    if (ex) { ex.file = it.file; ex.fromCopy = false; } else S.batch.push({ fp: it.fp, file: it.file, stored: false });
+    remember(it.fp, it.file, base + i);
+  });
   renderList();
   if (items.length === 1) await openFile(items[0].file, items[0].fp);
-  else { showBatch(); makeThumbs(items); }
+  else showBatch();
+  makeThumbs(items);
+  makeCopies(items);
 }
 
-function remember(fp, file, picked) {
+function remember(fp, file, pickedAt) {
   const m = S.meta.get(fp) || { fp };
   m.name = file.name;
-  m[picked ? 'lastPicked' : 'lastOpened'] = Date.now();
+  m.sizeBytes = file.size;
+  if (pickedAt) { m.lastPicked = pickedAt; m.inList = true; } else m.lastOpened = Date.now();
   S.meta.set(fp, m);
   S.store.putMeta(m);
+}
+
+/** 앱을 켤 때: 고른 영상 목록을 되살리고, 끝낸 영상·목록에 없는 영상의 복사본은 지운다 */
+async function restoreBatch() {
+  const stored = Copies.supported ? await Copies.list() : new Set();
+  const listed = [...S.meta.values()].filter((m) => m.inList).sort((a, b) => (a.lastPicked || 0) - (b.lastPicked || 0));
+  S.batch = listed.map((m) => ({ fp: m.fp, file: null, stored: stored.has(m.fp) }));
+  for (const fp of stored) {
+    const m = S.meta.get(fp);
+    if (!m || !m.inList || stateOf(fp) === 'done') {
+      await Copies.remove(fp);
+      const b = S.batch.find((x) => x.fp === fp);
+      if (b) b.stored = false;
+    }
+  }
+  renderList();
+}
+
+/** 목록의 영상 열기: 이번에 고른 파일 → 기기 복사본 → 없으면 다시 골라 달라고 안내 */
+async function openBatchItem(b) {
+  if (b.fp === S.fp) return;
+  let file = b.file;
+  if (!file && b.stored) {
+    file = await Copies.open(b.fp);
+    if (file) { b.file = file; b.fromCopy = true; } else b.stored = false;
+  }
+  if (!file) {
+    toast(`'${itemName(b.fp)}'을(를) 다시 골라 주세요 — 고르면 라벨이 이어져요`);
+    openPicker();
+    return;
+  }
+  await openFile(file, b.fp);
 }
 
 const STATE_ORDER = { todo: 0, doing: 1, done: 2 };
@@ -279,11 +338,23 @@ function sortedBatch() {
   return S.batch.map((b, i) => ({ b, i })).sort((x, y) => (STATE_ORDER[stateOf(x.b.fp)] - STATE_ORDER[stateOf(y.b.fp)]) || (x.i - y.i)).map((x) => x.b);
 }
 
+function removeFromBatch(fps) {
+  for (const fp of fps) {
+    S.batch = S.batch.filter((b) => b.fp !== fp);
+    const m = S.meta.get(fp);
+    if (m) { m.inList = false; S.store.putMeta(m); }
+    if (fp !== S.fp) Copies.remove(fp);
+  }
+  renderList();
+}
+
 function showBatch() {
   closeDrawer();
   if (!S.batch.length) { openPicker(); return; }
   const count = { todo: 0, doing: 0, done: 0 };
   for (const b of S.batch) count[stateOf(b.fp)]++;
+  const storedMb = S.batch.filter((b) => b.stored).reduce((n, b) => n + ((S.meta.get(b.fp) || {}).sizeBytes || 0), 0) / 1e6;
+  const close = () => { S.batchOpen = false; closeModal(); };
   S.batchOpen = true;
   openModal(
     h('h2', {}, `고른 영상 ${S.batch.length}개`),
@@ -293,11 +364,44 @@ function showBatch() {
       h('span', { class: 'state done' }, `끝남 ${count.done}`)),
     h('ul', { class: 'batch-list' }, sortedBatch().map((b) => h('li', {
       class: `batch-row${b.fp === S.fp ? ' active' : ''}`,
-      onclick: () => { S.batchOpen = false; closeModal(); if (b.fp !== S.fp) openFile(b.file, b.fp); },
-    }, thumbEl(b.fp), h('span', { class: 'v-name' }, itemName(b.fp, b.file.name)), stateChip(b.fp)))),
+      onclick: () => { close(); openBatchItem(b); },
+    }, thumbEl(b.fp),
+    h('span', { class: 'v-name' }, itemName(b.fp, b.file && b.file.name),
+      !b.file && !b.stored ? h('span', { class: 'hint' }, '다시 골라야 열려요') : null),
+    stateChip(b.fp),
+    h('button', {
+      class: 'btn small ghost row-x', 'aria-label': '목록에서 빼기', title: '목록에서 빼기 (라벨은 그대로)',
+      onclick: (e) => { e.stopPropagation(); removeFromBatch([b.fp]); showBatch(); },
+    }, '×')))),
+    h('p', { class: 'muted small' }, Copies.supported
+      ? `목록의 영상은 이 폰 안(앱 전용 공간)에 복사해 둬서 새로 고쳐도 바로 열려요 · 지금 ${Math.round(storedMb)}MB · 끝낸 영상의 복사본은 자동으로 지워요`
+      : '이 브라우저는 영상을 기기에 보관할 수 없어서, 새로 고친 뒤에는 다시 골라야 열려요'),
     h('div', { class: 'modal-actions' },
-      h('button', { class: 'btn', onclick: () => { S.batchOpen = false; closeModal(); openPicker(); } }, '영상 더 고르기'),
-      h('button', { class: 'btn primary', onclick: () => { S.batchOpen = false; closeModal(); } }, '닫기')));
+      count.done ? h('button', { class: 'btn ghost', onclick: () => { removeFromBatch(S.batch.filter((b) => stateOf(b.fp) === 'done').map((b) => b.fp)); showBatch(); } }, '끝난 영상 빼기') : null,
+      h('button', { class: 'btn', onclick: () => { close(); openPicker(); } }, '영상 더 고르기'),
+      h('button', { class: 'btn primary', onclick: close }, '닫기')));
+}
+
+/** 고른 영상을 기기(OPFS)에 하나씩 복사 — 끝난 영상은 복사하지 않는다 */
+let copyQueue = Promise.resolve();
+let persistAsked = false;
+function makeCopies(items) {
+  if (!Copies.supported) return;
+  if (!persistAsked && navigator.storage.persist) { persistAsked = true; navigator.storage.persist().catch(() => {}); }
+  for (const it of items) {
+    copyQueue = copyQueue.then(async () => {
+      const b = S.batch.find((x) => x.fp === it.fp);
+      if (!b || b.stored || stateOf(it.fp) === 'done') return;
+      try {
+        await Copies.save(it.fp, it.file);
+        b.stored = true;
+        renderList();
+        if (S.batchOpen && !$('#modal').hidden) showBatch();
+      } catch (e) {
+        toast(`기기에 보관하지 못했어요 (${e.name === 'QuotaExceededError' ? '저장 공간 부족' : e.message}) — 새로 고치면 다시 골라야 해요`);
+      }
+    });
+  }
 }
 
 /** 썸네일·길이를 하나씩 만든다 (목록에서 영상을 알아보기 쉽게, 이 기기에만 저장) */
@@ -306,7 +410,7 @@ function makeThumbs(items) {
   for (const it of items) {
     thumbQueue = thumbQueue.then(async () => {
       const m = S.meta.get(it.fp) || { fp: it.fp };
-      if (m.thumb && m.durationMs) return;
+      if ((m.thumb && m.durationMs) || !it.file) return;
       const r = await grabThumb(it.file);
       if (!r) return;
       Object.assign(m, r);
@@ -349,6 +453,12 @@ async function leaveVideo() {
   closeDrawer();
   if (S.unsaved) await saveNow();
   if (S.store) S.store.sync();
+  const b = S.fp && S.batch.find((x) => x.fp === S.fp);
+  if (b && b.stored && stateOf(b.fp) === 'done') { // 끝낸 영상의 복사본은 지운다 (원본은 갤러리에)
+    await Copies.remove(b.fp);
+    b.stored = false;
+    if (b.fromCopy) { b.file = null; b.fromCopy = false; }
+  }
 }
 
 function setSource(src, url) {
@@ -1234,7 +1344,11 @@ function renderGuide() {
 }
 
 function guide() {
-  if (!S.label) return { step: 1, text: '① 라벨링할 영상을 열어 주세요. 영상은 이 기기에서만 재생돼요.', actionLabel: '영상 열기', action: openPicker };
+  if (!S.label && S.batch.length) {
+    const left = S.batch.filter((b) => stateOf(b.fp) !== 'done').length;
+    return { step: 1, text: `① 고른 영상 ${S.batch.length}개 중 ${left}개가 남았어요. 목록에서 골라 이어서 해요.`, actionLabel: '고른 영상 목록', action: showBatch };
+  }
+  if (!S.label) return { step: 1, text: '① 라벨링할 영상을 열어 주세요. 여러 개를 한꺼번에 골라도 돼요.', actionLabel: '영상 열기', action: openPicker };
   const p = prob();
   if (!p.startRois.length) return { step: 2, text: '② 시작 홀드가 보이는 장면으로 옮긴 뒤, 영상 위 시작 홀드를 표시해요.', actionLabel: '시작 홀드 표시하기', action: () => { switchTab('holds'); startDraw('start', 0); } };
   if (!p.topRoi) return { step: 2, text: '② 탑 홀드가 보이는 장면에서 탑 홀드를 표시해요.', actionLabel: '탑 홀드 표시하기', action: () => { switchTab('holds'); startDraw('top'); } };
@@ -1292,8 +1406,8 @@ function renderList() {
       const done = S.batch.filter((b) => stateOf(b.fp) === 'done').length;
       progress = `고른 영상 ${S.batch.length}개 중 ${done}개 끝남`;
       for (const b of sortedBatch()) {
-        items.push(h('li', { class: `video-item${S.fp === b.fp ? ' active' : ''}`, onclick: () => { if (S.fp !== b.fp) openFile(b.file, b.fp); } },
-          thumbEl(b.fp), h('span', { class: 'v-name' }, itemName(b.fp, b.file.name)), stateChip(b.fp)));
+        items.push(h('li', { class: `video-item${S.fp === b.fp ? ' active' : ''}`, onclick: () => openBatchItem(b) },
+          thumbEl(b.fp), h('span', { class: 'v-name' }, itemName(b.fp, b.file && b.file.name)), stateChip(b.fp)));
       }
     }
     const older = [...S.labels.values()].filter((l) => !inBatch.has(l.video.fingerprint))
@@ -1314,6 +1428,9 @@ function renderList() {
       }
     }
   }
+  const eb = $('#emptyBatchBtn');
+  eb.hidden = !S.batch.length;
+  eb.textContent = `고른 영상 목록 (${S.batch.length}개)`;
   for (const slot of $$('[data-slot=progress]')) slot.textContent = progress;
   for (const slot of $$('[data-slot=videos]')) slot.replaceChildren(...items.map((li) => li.cloneNode(true)));
   // cloneNode는 이벤트를 복사하지 않으므로 다시 연결
@@ -1342,7 +1459,7 @@ function nextVideo() {
     const idx = S.batch.findIndex((b) => b.fp === S.fp);
     const order = S.batch.slice(idx + 1).concat(S.batch.slice(0, Math.max(0, idx)));
     const next = order.find((b) => b.fp !== S.fp && stateOf(b.fp) !== 'done');
-    if (next) openFile(next.file, next.fp);
+    if (next) openBatchItem(next);
     else if (S.batch.length) { toast('고른 영상을 다 끝냈어요 🎉 — 더 하려면 영상 열기'); showBatch(); }
     else openPicker();
     return;

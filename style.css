@@ -259,6 +259,9 @@ button, input, select { font: inherit; color: inherit; }
 .batch-row { display: flex; align-items: center; gap: 10px; min-height: 64px; padding: 6px 8px; border-radius: 10px; background: var(--panel2); cursor: pointer; border: 1px solid transparent; }
 .batch-row.active { border-color: var(--accent); }
 .batch-row .thumb { width: 48px; height: 62px; }
+.batch-row .v-name { display: flex; flex-direction: column; }
+.batch-row .hint { font-size: 12px; color: var(--warn); }
+.batch-row .row-x { min-height: 36px; width: 36px; padding: 0; font-size: 18px; color: var(--muted); }
 
 .drawer { position: fixed; inset: 0; z-index: 40; background: rgba(0, 0, 0, .5); }
 .drawer-card {
