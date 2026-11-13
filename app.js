@@ -94,19 +94,15 @@ function repoHint() {
   try { return localStorage.getItem(REPO_HINT_KEY) || ''; } catch (_) { return ''; }
 }
 
-/** 폰 사진 선택기는 파일 이름 대신 갤러리 번호(1000065656.mp4)를 준다 → 촬영 시각·길이로 보여 준다 */
-function videoName(file, takenAt, durationMs) {
-  if (!/^\d+\.(mp4|mov|m4v)$/i.test(file || '')) return file || '영상';
-  const parts = [];
-  if (takenAt) {
-    const d = new Date(takenAt);
-    parts.push(`${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`);
-  }
-  if (durationMs) parts.push(`${Math.round(durationMs / 1000)}초`);
-  return parts.length ? `영상 ${parts.join(' · ')}` : file;
+/** 폰 사진 선택기는 파일 이름 대신 갤러리 번호(1000065656.mp4)를 준다 → '영상 43초 · #5656'으로 보여 준다.
+ * (파일의 수정 시각은 촬영 시각이 아니라 처음 고른 시각이라 쓰지 않는다) */
+function videoName(file, durationMs) {
+  const m = /^(\d+)\.(mp4|mov|m4v)$/i.exec(file || '');
+  if (!m) return file || '영상';
+  return `영상${durationMs ? ` ${Math.round(durationMs / 1000)}초` : ''} · #${m[1].slice(-4)}`;
 }
 
-const labelName = (l) => videoName(l.video.file, l.video.takenAt, l.video.durationMs);
+const labelName = (l) => videoName(l.video.file, l.video.durationMs);
 
 async function init() {
   rememberRepoHint();
@@ -188,8 +184,6 @@ async function openFile(file) {
   S.fpsKnown = false;
   startFpsProbe();
   await loadLabel(fp, file.name, {});
-  if (!S.label.video.takenAt && file.lastModified) S.label.video.takenAt = file.lastModified;
-  renderLabel();
   toast(S.labels.has(fp) ? '전에 하던 라벨을 이어서 열었어요' : '새 영상이에요 — 홀드부터 표시해요');
 }
 
@@ -776,7 +770,7 @@ function renderAll() {
 
 function renderLabel() {
   $('#videoTitle').textContent = S.label
-    ? videoName(S.label.video.file, S.label.video.takenAt, S.label.video.durationMs || (video.duration ? video.duration * 1000 : null))
+    ? videoName(S.label.video.file, S.label.video.durationMs || (video.duration ? video.duration * 1000 : null))
     : (S.src ? S.src.name : '');
   $('#undoBtn').disabled = !S.undo.length;
   renderAttemptBar();
